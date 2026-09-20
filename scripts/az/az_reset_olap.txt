@@ -1,0 +1,6 @@
+az postgres flexible-server execute `
+  --name $server `
+  --admin-user $env:PGUSER `
+  --admin-password $env:PGPASSWORD `
+  --database-name olist_olap_abd `
+  --querytext "TRUNCATE TABLE fact_order_item, dim_seller, dim_customer, dim_product, dim_category, dim_geography, dim_date, dq_report RESTART IDENTITY;"
