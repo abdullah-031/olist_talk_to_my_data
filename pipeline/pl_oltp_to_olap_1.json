@@ -1,0 +1,633 @@
+{
+	"name": "pl_oltp_to_olap_1",
+	"properties": {
+		"activities": [
+			{
+				"name": "prepare_olap",
+				"type": "Script",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"linkedServiceName": {
+					"referenceName": "ls_pg_olap",
+					"type": "LinkedServiceReference"
+				},
+				"typeProperties": {
+					"scripts": [
+						{
+							"type": "NonQuery",
+							"text": "-----\n-- 1) Staging area: its own schema, created once\nCREATE SCHEMA IF NOT EXISTS stg;\n \nCREATE TABLE IF NOT EXISTS stg.order_items (\n    order_id        text,\n    order_item_id   int,\n    product_id      text,\n    seller_id       text,\n    price           numeric,\n    freight_value   numeric\n);\n \nCREATE TABLE IF NOT EXISTS stg.orders (\n    order_id                  text,\n    customer_id               text,\n    order_status              text,\n    order_purchase_timestamp  timestamp\n);\n \n-- 2) Data-quality log (never truncated: keeps history)\nCREATE TABLE IF NOT EXISTS public.dq_report (\n    run_at      timestamptz,\n    table_name  text,\n    check_name  text,\n    value       bigint\n);\n \n-- 3) Empty everything that is rebuilt on every run\nTRUNCATE TABLE public.fact_order_item,\n               public.dim_product, public.dim_customer, public.dim_seller,\n               public.dim_category, public.dim_geography, public.dim_date,\n               stg.order_items, stg.orders;\n \n-- 4) Natural keys must be unique inside each dimension\nCREATE UNIQUE INDEX IF NOT EXISTS uq_dim_customer_id   ON public.dim_customer  (customer_id);\nCREATE UNIQUE INDEX IF NOT EXISTS uq_dim_seller_id     ON public.dim_seller    (seller_id);\nCREATE UNIQUE INDEX IF NOT EXISTS uq_dim_product_id    ON public.dim_product   (product_id);\nCREATE UNIQUE INDEX IF NOT EXISTS uq_dim_category_pt   ON public.dim_category  (category_name_pt);\nCREATE UNIQUE INDEX IF NOT EXISTS uq_dim_geography_zip ON public.dim_geography (zip_prefix);"
+						}
+					],
+					"scriptBlockExecutionTimeout": "02:00:00"
+				}
+			},
+			{
+				"name": "copy_dq_report",
+				"type": "Copy",
+				"dependsOn": [
+					{
+						"activity": "prepare_olap",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzurePostgreSqlSource",
+						"query": "SELECT now() AS run_at, t.table_name, t.check_name, t.value\nFROM (\n    SELECT 'orders' AS table_name, 'raw_rows' AS check_name, count(*) AS value FROM orders\n    UNION ALL SELECT 'orders', 'null_order_id', count(*) FROM orders WHERE nullif(btrim(order_id), '') IS NULL\n    UNION ALL SELECT 'orders', 'duplicate_order_id', count(*) - count(DISTINCT btrim(order_id)) FROM orders\n    UNION ALL SELECT 'orders', 'null_purchase_date', count(*) FROM orders WHERE order_purchase_timestamp IS NULL\n    UNION ALL SELECT 'orders', 'delivered_without_delivery_date', count(*) FROM orders\n              WHERE lower(btrim(order_status)) = 'delivered' AND order_delivered_customer_date IS NULL\n    UNION ALL SELECT 'orders', 'orders_without_items', count(*) FROM orders o\n              WHERE NOT EXISTS (SELECT 1 FROM order_items i WHERE btrim(i.order_id) = btrim(o.order_id))\n    UNION ALL SELECT 'orders', 'orphan_customer_id', count(*) FROM orders o\n              WHERE NOT EXISTS (SELECT 1 FROM customers c WHERE btrim(c.customer_id) = btrim(o.customer_id))\n \n    UNION ALL SELECT 'customers', 'raw_rows', count(*) FROM customers\n    UNION ALL SELECT 'customers', 'null_customer_id', count(*) FROM customers WHERE nullif(btrim(customer_id), '') IS NULL\n    UNION ALL SELECT 'customers', 'duplicate_customer_id', count(*) - count(DISTINCT btrim(customer_id)) FROM customers\n    UNION ALL SELECT 'customers', 'repeat_customers_by_unique_id', count(*) - count(DISTINCT customer_unique_id) FROM customers\n \n    UNION ALL SELECT 'order_items', 'raw_rows', count(*) FROM order_items\n    UNION ALL SELECT 'order_items', 'duplicate_item_key', count(*) - count(DISTINCT (btrim(order_id), order_item_id)) FROM order_items\n    UNION ALL SELECT 'order_items', 'negative_price', count(*) FROM order_items WHERE price < 0 OR freight_value < 0\n    UNION ALL SELECT 'order_items', 'zero_price', count(*) FROM order_items WHERE price = 0\n    UNION ALL SELECT 'order_items', 'orphan_order_id', count(*) FROM order_items i\n              WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE btrim(o.order_id) = btrim(i.order_id))\n    UNION ALL SELECT 'order_items', 'orphan_product_id', count(*) FROM order_items i\n              WHERE NOT EXISTS (SELECT 1 FROM products p WHERE btrim(p.product_id) = btrim(i.product_id))\n    UNION ALL SELECT 'order_items', 'orphan_seller_id', count(*) FROM order_items i\n              WHERE NOT EXISTS (SELECT 1 FROM sellers s WHERE btrim(s.seller_id) = btrim(i.seller_id))\n \n    UNION ALL SELECT 'order_payments', 'raw_rows', count(*) FROM order_payments\n    UNION ALL SELECT 'order_payments', 'negative_value', count(*) FROM order_payments WHERE payment_value < 0\n    UNION ALL SELECT 'order_payments', 'high_value_flag_above_p99', count(*) FROM order_payments\n              WHERE payment_value > (SELECT percentile_cont(0.99) WITHIN GROUP (ORDER BY payment_value) FROM order_payments)\n \n    UNION ALL SELECT 'order_reviews', 'raw_rows', count(*) FROM order_reviews\n    UNION ALL SELECT 'order_reviews', 'score_out_of_range', count(*) FROM order_reviews WHERE review_score NOT BETWEEN 1 AND 5\n    UNION ALL SELECT 'order_reviews', 'no_comment_message', count(*) FROM order_reviews WHERE nullif(btrim(review_comment_message), '') IS NULL\n \n    UNION ALL SELECT 'products', 'raw_rows', count(*) FROM products\n    UNION ALL SELECT 'products', 'missing_category', count(*) FROM products WHERE nullif(btrim(product_category_name), '') IS NULL\n    UNION ALL SELECT 'products', 'missing_weight', count(*) FROM products WHERE product_weight_g IS NULL\n    UNION ALL SELECT 'products', 'zero_weight', count(*) FROM products WHERE product_weight_g = 0\n    UNION ALL SELECT 'products', 'category_without_translation', count(DISTINCT p.product_category_name) FROM products p\n              WHERE p.product_category_name IS NOT NULL AND NOT EXISTS (\n                  SELECT 1 FROM product_category_name_translation t\n                  WHERE lower(btrim(t.product_category_name)) = lower(btrim(p.product_category_name)))\n \n    UNION ALL SELECT 'sellers', 'raw_rows', count(*) FROM sellers\n    UNION ALL SELECT 'sellers', 'null_seller_id', count(*) FROM sellers WHERE nullif(btrim(seller_id), '') IS NULL\n \n    UNION ALL SELECT 'geolocation', 'raw_rows', count(*) FROM geolocation\n    UNION ALL SELECT 'geolocation', 'exact_duplicates', count(*) - (SELECT count(*) FROM (SELECT DISTINCT * FROM geolocation) d) FROM geolocation\n    UNION ALL SELECT 'geolocation', 'outside_brazil', count(*) FROM geolocation\n              WHERE NOT (geolocation_lat BETWEEN -34 AND 6 AND geolocation_lng BETWEEN -74 AND -34)\n) t",
+						"partitionOption": "None",
+						"queryTimeout": "02:00:00"
+					},
+					"sink": {
+						"type": "AzurePostgreSqlSink",
+						"writeBatchSize": 1000000,
+						"writeBatchTimeout": "00:30:00",
+						"writeMethod": "CopyCommand"
+					},
+					"enableStaging": false,
+					"translator": {
+						"type": "TabularTranslator",
+						"typeConversion": true,
+						"typeConversionSettings": {
+							"allowDataTruncation": true,
+							"treatBooleanAsNumber": false
+						}
+					}
+				},
+				"inputs": [
+					{
+						"referenceName": "ds_oltp_query",
+						"type": "DatasetReference"
+					}
+				],
+				"outputs": [
+					{
+						"referenceName": "ds_olap_table",
+						"type": "DatasetReference",
+						"parameters": {
+							"target_schema": "public",
+							"target_table": "dq_report"
+						}
+					}
+				]
+			},
+			{
+				"name": "copy_dim_geography",
+				"type": "Copy",
+				"dependsOn": [
+					{
+						"activity": "copy_dq_report",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzurePostgreSqlSource",
+						"query": "-- ACTIVITY 2  |  Copy: copy_dim_geography  ->  target_table: dim_geography\n--   Source: ds_oltp_query, Use query = Query. Sink: ds_olap_table, target_schema = public\n-- ---------------------------------------------------------------\nWITH geo AS (\n    SELECT lpad(btrim(geolocation_zip_code_prefix), 5, '0')           AS zip,\n           avg(geolocation_lat)                                        AS lat,\n           avg(geolocation_lng)                                        AS lng,\n           mode() WITHIN GROUP (ORDER BY initcap(lower(regexp_replace(translate(btrim(geolocation_city), 'áàâãäåéèêëíìîïóòôõöúùûüçñýÿÁÀÂÃÄÅÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑÝ´`ºª', 'aaaaaaeeeeiiiiooooouuuucnyyAAAAAAEEEEIIIIOOOOOUUUUCNY' || chr(39) || chr(39) || 'oa'), '[^\\x01-\\x7F]', '', 'g'))))   AS city,\n           mode() WITHIN GROUP (ORDER BY upper(left(btrim(geolocation_state), 2)))  AS state\n    FROM (SELECT DISTINCT * FROM geolocation) g\n    WHERE geolocation_lat BETWEEN -34 AND 6\n      AND geolocation_lng BETWEEN -74 AND -34\n    GROUP BY 1\n),\nextra AS (\n    SELECT DISTINCT ON (zip) zip, city, state\n    FROM (\n        SELECT lpad(btrim(customer_zip_code_prefix), 5, '0') AS zip,\n               initcap(lower(regexp_replace(translate(btrim(customer_city), 'áàâãäåéèêëíìîïóòôõöúùûüçñýÿÁÀÂÃÄÅÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑÝ´`ºª', 'aaaaaaeeeeiiiiooooouuuucnyyAAAAAAEEEEIIIIOOOOOUUUUCNY' || chr(39) || chr(39) || 'oa'), '[^\\x01-\\x7F]', '', 'g')))          AS city,\n               upper(left(btrim(customer_state), 2))         AS state\n        FROM customers\n        UNION ALL\n        SELECT lpad(btrim(seller_zip_code_prefix), 5, '0'),\n               initcap(lower(regexp_replace(translate(btrim(seller_city), 'áàâãäåéèêëíìîïóòôõöúùûüçñýÿÁÀÂÃÄÅÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑÝ´`ºª', 'aaaaaaeeeeiiiiooooouuuucnyyAAAAAAEEEEIIIIOOOOOUUUUCNY' || chr(39) || chr(39) || 'oa'), '[^\\x01-\\x7F]', '', 'g'))),\n               upper(left(btrim(seller_state), 2))\n        FROM sellers\n    ) z\n    WHERE zip NOT IN (SELECT zip FROM geo)\n    ORDER BY zip, city\n)\nSELECT zip::int AS geo_key, zip AS zip_prefix, city, state,\n       lat AS latitude, lng AS longitude\nFROM geo\nWHERE zip ~ '^[0-9]{5}$'\nUNION ALL\nSELECT zip::int, zip, city, state, NULL, NULL\nFROM extra\nWHERE zip ~ '^[0-9]{5}$'\nUNION ALL\nSELECT -1, '00000', 'Unknown', 'NA', NULL, NULL\n ",
+						"partitionOption": "None",
+						"queryTimeout": "02:00:00"
+					},
+					"sink": {
+						"type": "AzurePostgreSqlSink",
+						"writeBatchSize": 1000000,
+						"writeBatchTimeout": "00:30:00",
+						"writeMethod": "CopyCommand"
+					},
+					"enableStaging": false,
+					"translator": {
+						"type": "TabularTranslator",
+						"typeConversion": true,
+						"typeConversionSettings": {
+							"allowDataTruncation": true,
+							"treatBooleanAsNumber": false
+						}
+					}
+				},
+				"inputs": [
+					{
+						"referenceName": "ds_oltp_query",
+						"type": "DatasetReference"
+					}
+				],
+				"outputs": [
+					{
+						"referenceName": "ds_olap_table",
+						"type": "DatasetReference",
+						"parameters": {
+							"target_schema": "public",
+							"target_table": "dim_geography"
+						}
+					}
+				]
+			},
+			{
+				"name": "copy_dim_category",
+				"type": "Copy",
+				"dependsOn": [
+					{
+						"activity": "copy_dim_geography",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzurePostgreSqlSource",
+						"query": "---------------------------------\n-- ACTIVITY 3  |  Copy: copy_dim_category  ->  target_table: dim_category\n--   Source: ds_oltp_query, Use query = Query. Sink: ds_olap_table, target_schema = public\n-- ---------------------------------------------------------------\nWITH cat AS (\n    SELECT name, row_number() OVER (ORDER BY name)::int AS category_key\n    FROM (\n        SELECT lower(btrim(product_category_name)) AS name\n        FROM product_category_name_translation\n        WHERE nullif(btrim(product_category_name), '') IS NOT NULL\n        UNION\n        SELECT lower(btrim(product_category_name))\n        FROM products\n        WHERE nullif(btrim(product_category_name), '') IS NOT NULL\n    ) n\n)\nSELECT c.category_key,\n       c.name AS category_name_pt,\n       coalesce(initcap(replace(lower(btrim(t.product_category_name_english)), '_', ' ')),\n                initcap(replace(c.name, '_', ' '))) AS category_name_english\nFROM cat c\nLEFT JOIN product_category_name_translation t\n       ON lower(btrim(t.product_category_name)) = c.name\nUNION ALL\nSELECT -1, 'desconhecido', 'Unknown'\n ",
+						"partitionOption": "None",
+						"queryTimeout": "02:00:00"
+					},
+					"sink": {
+						"type": "AzurePostgreSqlSink",
+						"writeBatchSize": 1000000,
+						"writeBatchTimeout": "00:30:00",
+						"writeMethod": "CopyCommand"
+					},
+					"enableStaging": false,
+					"translator": {
+						"type": "TabularTranslator",
+						"typeConversion": true,
+						"typeConversionSettings": {
+							"allowDataTruncation": true,
+							"treatBooleanAsNumber": false
+						}
+					}
+				},
+				"inputs": [
+					{
+						"referenceName": "ds_oltp_query",
+						"type": "DatasetReference"
+					}
+				],
+				"outputs": [
+					{
+						"referenceName": "ds_olap_table",
+						"type": "DatasetReference",
+						"parameters": {
+							"target_schema": "public",
+							"target_table": "dim_category"
+						}
+					}
+				]
+			},
+			{
+				"name": "copy_dim_date",
+				"type": "Copy",
+				"dependsOn": [
+					{
+						"activity": "copy_dim_category",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzurePostgreSqlSource",
+						"query": "SELECT to_char(d, 'YYYYMMDD')::int          AS date_key,\n       d::date                              AS full_date,\n       extract(year    FROM d)::int         AS year,\n       extract(quarter FROM d)::int         AS quarter,\n       extract(month   FROM d)::int         AS month,\n       trim(to_char(d, 'Month'))            AS month_name,\n       extract(day     FROM d)::int         AS day,\n       extract(isodow  FROM d)::int         AS day_of_week,\n       trim(to_char(d, 'Day'))              AS day_name,\n       extract(week    FROM d)::int         AS week_of_year\nFROM generate_series(\n        (SELECT min(order_purchase_timestamp)::date FROM orders),\n        (SELECT max(order_purchase_timestamp)::date FROM orders),\n        interval '1 day') AS d\nUNION ALL\nSELECT -1, DATE '1900-01-01', 1900, 1, 1, 'Unknown', 1, 1, 'Unknown', 1\n ",
+						"partitionOption": "None",
+						"queryTimeout": "02:00:00"
+					},
+					"sink": {
+						"type": "AzurePostgreSqlSink",
+						"writeBatchSize": 1000000,
+						"writeBatchTimeout": "00:30:00",
+						"writeMethod": "CopyCommand"
+					},
+					"enableStaging": false,
+					"translator": {
+						"type": "TabularTranslator",
+						"typeConversion": true,
+						"typeConversionSettings": {
+							"allowDataTruncation": true,
+							"treatBooleanAsNumber": false
+						}
+					}
+				},
+				"inputs": [
+					{
+						"referenceName": "ds_oltp_query",
+						"type": "DatasetReference"
+					}
+				],
+				"outputs": [
+					{
+						"referenceName": "ds_olap_table",
+						"type": "DatasetReference",
+						"parameters": {
+							"target_schema": "public",
+							"target_table": "dim_date"
+						}
+					}
+				]
+			},
+			{
+				"name": "copy_dim_customer",
+				"type": "Copy",
+				"dependsOn": [
+					{
+						"activity": "copy_dim_date",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzurePostgreSqlSource",
+						"query": "WITH cust AS (\n    SELECT DISTINCT ON (btrim(customer_id))\n           btrim(customer_id)                                AS customer_id,\n           btrim(customer_unique_id)                         AS customer_unique_id,\n           lpad(btrim(customer_zip_code_prefix), 5, '0')     AS zip,\n           initcap(lower(regexp_replace(translate(btrim(customer_city), 'áàâãäåéèêëíìîïóòôõöúùûüçñýÿÁÀÂÃÄÅÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑÝ´`ºª', 'aaaaaaeeeeiiiiooooouuuucnyyAAAAAAEEEEIIIIOOOOOUUUUCNY' || chr(39) || chr(39) || 'oa'), '[^\\x01-\\x7F]', '', 'g')))              AS customer_city,\n           upper(left(btrim(customer_state), 2))             AS customer_state\n    FROM customers\n    WHERE nullif(btrim(customer_id), '') IS NOT NULL\n    ORDER BY btrim(customer_id)\n)\nSELECT row_number() OVER (ORDER BY customer_id)::int AS customer_key,\n       customer_id, customer_unique_id,\n       coalesce(CASE WHEN zip ~ '^[0-9]{5}$' THEN zip::int END, -1) AS geo_key,\n       customer_city, customer_state\nFROM cust\nUNION ALL\nSELECT -1, 'unknown', 'unknown', -1, 'Unknown', 'NA'",
+						"partitionOption": "None",
+						"queryTimeout": "02:00:00"
+					},
+					"sink": {
+						"type": "AzurePostgreSqlSink",
+						"writeBatchSize": 1000000,
+						"writeBatchTimeout": "00:30:00",
+						"writeMethod": "CopyCommand"
+					},
+					"enableStaging": false,
+					"translator": {
+						"type": "TabularTranslator",
+						"typeConversion": true,
+						"typeConversionSettings": {
+							"allowDataTruncation": true,
+							"treatBooleanAsNumber": false
+						}
+					}
+				},
+				"inputs": [
+					{
+						"referenceName": "ds_oltp_query",
+						"type": "DatasetReference"
+					}
+				],
+				"outputs": [
+					{
+						"referenceName": "ds_olap_table",
+						"type": "DatasetReference",
+						"parameters": {
+							"target_schema": "public",
+							"target_table": "dim_customer"
+						}
+					}
+				]
+			},
+			{
+				"name": "copy_dim_seller",
+				"type": "Copy",
+				"dependsOn": [
+					{
+						"activity": "copy_dim_customer",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzurePostgreSqlSource",
+						"query": "WITH sell AS (\n    SELECT DISTINCT ON (btrim(seller_id))\n           btrim(seller_id)                                  AS seller_id,\n           lpad(btrim(seller_zip_code_prefix), 5, '0')       AS zip,\n           initcap(lower(regexp_replace(translate(btrim(seller_city), 'áàâãäåéèêëíìîïóòôõöúùûüçñýÿÁÀÂÃÄÅÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑÝ´`ºª', 'aaaaaaeeeeiiiiooooouuuucnyyAAAAAAEEEEIIIIOOOOOUUUUCNY' || chr(39) || chr(39) || 'oa'), '[^\\x01-\\x7F]', '', 'g')))                AS seller_city,\n           upper(left(btrim(seller_state), 2))               AS seller_state\n    FROM sellers\n    WHERE nullif(btrim(seller_id), '') IS NOT NULL\n    ORDER BY btrim(seller_id)\n)\nSELECT row_number() OVER (ORDER BY seller_id)::int AS seller_key,\n       seller_id,\n       coalesce(CASE WHEN zip ~ '^[0-9]{5}$' THEN zip::int END, -1) AS geo_key,\n       seller_city, seller_state\nFROM sell\nUNION ALL\nSELECT -1, 'unknown', -1, 'Unknown', 'NA'",
+						"partitionOption": "None",
+						"queryTimeout": "02:00:00"
+					},
+					"sink": {
+						"type": "AzurePostgreSqlSink",
+						"writeBatchSize": 1000000,
+						"writeBatchTimeout": "00:30:00",
+						"writeMethod": "CopyCommand"
+					},
+					"enableStaging": false,
+					"translator": {
+						"type": "TabularTranslator",
+						"typeConversion": true,
+						"typeConversionSettings": {
+							"allowDataTruncation": true,
+							"treatBooleanAsNumber": false
+						}
+					}
+				},
+				"inputs": [
+					{
+						"referenceName": "ds_oltp_query",
+						"type": "DatasetReference"
+					}
+				],
+				"outputs": [
+					{
+						"referenceName": "ds_olap_table",
+						"type": "DatasetReference",
+						"parameters": {
+							"target_schema": "public",
+							"target_table": "dim_seller"
+						}
+					}
+				]
+			},
+			{
+				"name": "copy_dim_product",
+				"type": "Copy",
+				"dependsOn": [
+					{
+						"activity": "copy_dim_seller",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzurePostgreSqlSource",
+						"query": "\nWITH cat AS (\n    SELECT name, row_number() OVER (ORDER BY name)::int AS category_key\n    FROM (\n        SELECT lower(btrim(product_category_name)) AS name\n        FROM product_category_name_translation\n        WHERE nullif(btrim(product_category_name), '') IS NOT NULL\n        UNION\n        SELECT lower(btrim(product_category_name))\n        FROM products\n        WHERE nullif(btrim(product_category_name), '') IS NOT NULL\n    ) n\n),\nprod AS (\n    SELECT DISTINCT ON (btrim(product_id))\n           btrim(product_id)                                 AS product_id,\n           nullif(lower(btrim(product_category_name)), '')   AS cat_name,\n           product_name_lenght, product_description_lenght, product_photos_qty,\n           product_weight_g, product_length_cm, product_height_cm, product_width_cm\n    FROM products\n    WHERE nullif(btrim(product_id), '') IS NOT NULL\n    ORDER BY btrim(product_id)\n)\nSELECT row_number() OVER (ORDER BY p.product_id)::int AS product_key,\n       p.product_id,\n       coalesce(c.category_key, -1)                  AS category_key,\n       p.product_name_lenght, p.product_description_lenght, p.product_photos_qty,\n       p.product_weight_g, p.product_length_cm, p.product_height_cm, p.product_width_cm\nFROM prod p\nLEFT JOIN cat c ON c.name = p.cat_name\nUNION ALL\nSELECT -1, 'unknown', -1, NULL, NULL, NULL, NULL, NULL, NULL, NULL",
+						"partitionOption": "None",
+						"queryTimeout": "02:00:00"
+					},
+					"sink": {
+						"type": "AzurePostgreSqlSink",
+						"writeBatchSize": 1000000,
+						"writeBatchTimeout": "00:30:00",
+						"writeMethod": "CopyCommand"
+					},
+					"enableStaging": false,
+					"translator": {
+						"type": "TabularTranslator",
+						"typeConversion": true,
+						"typeConversionSettings": {
+							"allowDataTruncation": true,
+							"treatBooleanAsNumber": false
+						}
+					}
+				},
+				"inputs": [
+					{
+						"referenceName": "ds_oltp_query",
+						"type": "DatasetReference"
+					}
+				],
+				"outputs": [
+					{
+						"referenceName": "ds_olap_table",
+						"type": "DatasetReference",
+						"parameters": {
+							"target_schema": "public",
+							"target_table": "dim_product"
+						}
+					}
+				]
+			},
+			{
+				"name": "quality_checks",
+				"type": "Script",
+				"dependsOn": [
+					{
+						"activity": "build_fact",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"linkedServiceName": {
+					"referenceName": "ls_pg_olap",
+					"type": "LinkedServiceReference"
+				},
+				"typeProperties": {
+					"scripts": [
+						{
+							"type": "NonQuery",
+							"text": "\n-- Script: quality_checks\n--   Linked service: ls_pg_olap   |   Script type: NonQuery\n-- ---------------------------------------------------------------\nDO $$\nDECLARE\n    n bigint;\n    raw_items bigint; dup_items bigint; raw_orders bigint;\nBEGIN\n    SELECT sum(value) FILTER (WHERE table_name = 'order_items' AND check_name = 'raw_rows'),\n           sum(value) FILTER (WHERE table_name = 'order_items' AND check_name = 'duplicate_item_key'),\n           sum(value) FILTER (WHERE table_name = 'orders'      AND check_name = 'raw_rows')\n      INTO raw_items, dup_items, raw_orders\n    FROM public.dq_report\n    WHERE run_at = (SELECT max(run_at) FROM public.dq_report);\n \n    IF raw_items IS NULL OR dup_items IS NULL OR raw_orders IS NULL THEN\n        RAISE EXCEPTION 'dq_report is missing order_items.raw_rows, order_items.duplicate_item_key or orders.raw_rows';\n    END IF;\n \n    -- Stage 3: staging received every source row\n    SELECT count(*) INTO n FROM stg.order_items;\n    IF n <> raw_items THEN\n        RAISE EXCEPTION 'stg.order_items has % rows, source has %', n, raw_items;\n    END IF;\n    SELECT count(*) INTO n FROM stg.orders;\n    IF n <> raw_orders THEN\n        RAISE EXCEPTION 'stg.orders has % rows, source has %', n, raw_orders;\n    END IF;\n \n    -- Stage 4: fact lost nothing\n    SELECT count(*) INTO n FROM public.fact_order_item;\n    IF n <> raw_items - dup_items THEN\n        RAISE EXCEPTION 'fact_order_item has % rows, expected %', n, raw_items - dup_items;\n    END IF;\n \n    -- Stage 4: every key resolved against a real dimension row where one exists\n    SELECT count(*) INTO n\n    FROM public.fact_order_item f\n    JOIN stg.orders o ON o.order_id = f.order_id\n    JOIN public.dim_customer c ON c.customer_id = o.customer_id\n    WHERE f.customer_key = -1;\n    IF n > 0 THEN\n        RAISE EXCEPTION '% fact rows got Unknown customer although the customer exists', n;\n    END IF;\n \n    SELECT count(*) INTO n FROM public.fact_order_item\n    WHERE item_total <> round(price + freight_value, 2);\n    IF n > 0 THEN RAISE EXCEPTION 'item_total wrong on % rows', n; END IF;\nEND $$;"
+						}
+					],
+					"scriptBlockExecutionTimeout": "02:00:00"
+				}
+			},
+			{
+				"name": "build_fact",
+				"type": "Script",
+				"dependsOn": [
+					{
+						"activity": "copy_stg_orders",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"linkedServiceName": {
+					"referenceName": "ls_pg_olap",
+					"type": "LinkedServiceReference"
+				},
+				"typeProperties": {
+					"scripts": [
+						{
+							"type": "Query",
+							"text": "-- Script: build_fact\n--   Linked service: ls_pg_olap   |   Script type: NonQuery\n-- ---------------------------------------------------------------\nINSERT INTO public.fact_order_item (\n    order_id, order_item_id, order_status, date_key,\n    customer_key, product_key, seller_key, category_key,\n    price, freight_value, item_total)\nSELECT\n    oi.order_id,\n    oi.order_item_id,\n    o.order_status,\n    coalesce(dd.date_key,     -1) AS date_key,\n    coalesce(dc.customer_key, -1) AS customer_key,\n    coalesce(dp.product_key,  -1) AS product_key,\n    coalesce(ds.seller_key,   -1) AS seller_key,\n    coalesce(dp.category_key, -1) AS category_key,\n    oi.price,\n    oi.freight_value,\n    round(oi.price + oi.freight_value, 2) AS item_total\nFROM (SELECT DISTINCT ON (order_id, order_item_id) *\n      FROM stg.order_items\n      WHERE nullif(order_id, '') IS NOT NULL\n      ORDER BY order_id, order_item_id) oi\nLEFT JOIN (SELECT DISTINCT ON (order_id) *\n           FROM stg.orders\n           ORDER BY order_id) o\n       ON o.order_id = oi.order_id\nLEFT JOIN public.dim_customer dc ON dc.customer_id = o.customer_id\nLEFT JOIN public.dim_product  dp ON dp.product_id  = oi.product_id\nLEFT JOIN public.dim_seller   ds ON ds.seller_id   = oi.seller_id\nLEFT JOIN public.dim_date     dd ON dd.full_date   = o.order_purchase_timestamp::date\n                                AND dd.date_key   <> -1;"
+						}
+					],
+					"scriptBlockExecutionTimeout": "02:00:00"
+				}
+			},
+			{
+				"name": "copy_stg_order_items",
+				"type": "Copy",
+				"dependsOn": [
+					{
+						"activity": "copy_dim_product",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzurePostgreSqlSource",
+						"query": "--   Source: ds_oltp_query (Query)   Sink: ds_olap_table  schema=stg  table=order_items\n-- ---------------------------------------------------------------\nSELECT btrim(order_id)    AS order_id,\n       order_item_id,\n       btrim(product_id)  AS product_id,\n       btrim(seller_id)   AS seller_id,\n       price,\n       freight_value\nFROM order_items\n ",
+						"partitionOption": "None",
+						"queryTimeout": "02:00:00"
+					},
+					"sink": {
+						"type": "AzurePostgreSqlSink",
+						"writeBatchSize": 1000000,
+						"writeBatchTimeout": "00:30:00",
+						"writeMethod": "CopyCommand"
+					},
+					"enableStaging": false,
+					"translator": {
+						"type": "TabularTranslator",
+						"typeConversion": true,
+						"typeConversionSettings": {
+							"allowDataTruncation": true,
+							"treatBooleanAsNumber": false
+						}
+					}
+				},
+				"inputs": [
+					{
+						"referenceName": "ds_oltp_query",
+						"type": "DatasetReference"
+					}
+				],
+				"outputs": [
+					{
+						"referenceName": "ds_olap_table",
+						"type": "DatasetReference",
+						"parameters": {
+							"target_schema": "stg",
+							"target_table": "order_items"
+						}
+					}
+				]
+			},
+			{
+				"name": "copy_stg_orders",
+				"type": "Copy",
+				"dependsOn": [
+					{
+						"activity": "copy_stg_order_items",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzurePostgreSqlSource",
+						"query": "\n--   Source: ds_oltp_query (Query)   Sink: ds_olap_table  schema=stg  table=orders\n-- ---------------------------------------------------------------\nSELECT btrim(order_id)              AS order_id,\n       btrim(customer_id)           AS customer_id,\n       lower(btrim(order_status))   AS order_status,\n       order_purchase_timestamp\nFROM orders",
+						"partitionOption": "None",
+						"queryTimeout": "02:00:00"
+					},
+					"sink": {
+						"type": "AzurePostgreSqlSink",
+						"writeBatchSize": 1000000,
+						"writeBatchTimeout": "00:30:00",
+						"writeMethod": "CopyCommand"
+					},
+					"enableStaging": false,
+					"translator": {
+						"type": "TabularTranslator",
+						"typeConversion": true,
+						"typeConversionSettings": {
+							"allowDataTruncation": true,
+							"treatBooleanAsNumber": false
+						}
+					}
+				},
+				"inputs": [
+					{
+						"referenceName": "ds_oltp_query",
+						"type": "DatasetReference"
+					}
+				],
+				"outputs": [
+					{
+						"referenceName": "ds_olap_table",
+						"type": "DatasetReference",
+						"parameters": {
+							"target_schema": "stg",
+							"target_table": "orders"
+						}
+					}
+				]
+			}
+		],
+		"annotations": [],
+		"lastPublishTime": "2026-09-22T10:28:52Z"
+	},
+	"type": "Microsoft.DataFactory/factories/pipelines"
+}

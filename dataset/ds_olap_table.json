@@ -1,0 +1,32 @@
+{
+	"name": "ds_olap_table",
+	"properties": {
+		"linkedServiceName": {
+			"referenceName": "ls_pg_olap",
+			"type": "LinkedServiceReference"
+		},
+		"parameters": {
+			"target_schema": {
+				"type": "string",
+				"defaultValue": "public"
+			},
+			"target_table": {
+				"type": "string"
+			}
+		},
+		"annotations": [],
+		"type": "AzurePostgreSqlTable",
+		"schema": [],
+		"typeProperties": {
+			"schema": {
+				"value": "@dataset().target_schema",
+				"type": "Expression"
+			},
+			"table": {
+				"value": "@dataset().target_table",
+				"type": "Expression"
+			}
+		}
+	},
+	"type": "Microsoft.DataFactory/factories/datasets"
+}

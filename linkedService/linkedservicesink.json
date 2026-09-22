@@ -1,0 +1,16 @@
+{
+	"name": "linkedservicesink",
+	"type": "Microsoft.DataFactory/factories/linkedservices",
+	"properties": {
+		"annotations": [],
+		"type": "AzurePostgreSql",
+		"version": "2.0",
+		"typeProperties": {
+			"server": "tgsdb.postgres.database.azure.com",
+			"port": "5432",
+			"database": "tgs_data",
+			"sslMode": 2,
+			"authenticationType": "SystemAssignedManagedIdentity"
+		}
+	}
+}

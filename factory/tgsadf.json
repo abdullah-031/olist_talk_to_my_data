@@ -1,0 +1,15 @@
+{
+	"name": "tgsadf",
+	"properties": {
+		"trustModeClaimForMi": {
+			"value": "Disabled",
+			"editable": true
+		}
+	},
+	"location": "northeurope",
+	"identity": {
+		"type": "SystemAssigned",
+		"principalId": "f1823a74-6551-4782-80a7-51243262219e",
+		"tenantId": "b90e9d5f-5d6c-4e8e-a904-fbfa84898c24"
+	}
+}

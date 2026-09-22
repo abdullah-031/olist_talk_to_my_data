@@ -1,0 +1,17 @@
+{
+	"name": "ds_oltp_query",
+	"properties": {
+		"linkedServiceName": {
+			"referenceName": "ls_pg_oltp",
+			"type": "LinkedServiceReference"
+		},
+		"annotations": [],
+		"type": "AzurePostgreSqlTable",
+		"schema": [],
+		"typeProperties": {
+			"schema": "public",
+			"table": "orders"
+		}
+	},
+	"type": "Microsoft.DataFactory/factories/datasets"
+}
