@@ -63,3 +63,19 @@ Two logs on purpose: **business** (stakeholder / product intent) and **technical
 |------|----------|
 | Source | `olist_oltp_abd` |
 | Target | `olist_olap_abd` |
+
+## 2026-09-22 — Local warehouse agent
+
+Added a React/TypeScript UI and FastAPI API using GPT-4.1 nano. The final provider is
+OpenRouter (`OPENROUTER_API_KEY`, model `openai/gpt-4.1-nano`) following the user's
+credential clarification; direct OpenAI and Azure adapters remain available.
+The app compiles validated aggregate plans into parameterized,
+read-only PostgreSQL queries. The warehouse model and KNIME loading ownership remain unchanged.
+See [the engineering decision table](agent-decisions.md) for options, rationale,
+scaling paths, tradeoffs, weaknesses and official Azure/PostgreSQL sources.
+
+Live verification found all 112,650 `fact_order_item.category_key` values NULL and
+no product-to-category matches. Other fact dimension joins passed. This contradicts
+the older all-keys-present operational note. The app now checks category coverage
+and declines category questions until KNIME repairs the links; it does not invent
+a fallback or modify the warehouse. Revenue/state/time analytics remain available.

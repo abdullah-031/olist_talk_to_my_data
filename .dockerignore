@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+.venv
+**/__pycache__
+**/node_modules
+**/dist
+data
+knime
+logs
+artifacts
+.pytest_cache
+.ruff_cache

@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file: .env
+    environment:
+      AUDIT_LOG_PATH: /app/logs/db_operations.md
+    volumes:
+      - ./logs:/app/logs
+    init: true
+    restart: unless-stopped
