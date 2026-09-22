@@ -18,3 +18,4 @@ frontend/*.tsbuildinfo
 .cursor-pytest-review/
 # Personal notes, drafts, and reviews that are not team documentation.
 docs/local/
+AGENTS.md
