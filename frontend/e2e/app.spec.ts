@@ -139,6 +139,46 @@ test('mobile layout fits the viewport', async ({ page }) => {
   expect(overflow).toBe(false);
 });
 
+test.describe('on a phone', () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
+
+  test('history opens in a drawer', async ({ page }) => {
+    await page.route('**/api/conversations', (route) =>
+      route.fulfill({ json: [{ id: 'conv_1', title: 'Total revenue?', created_at: 1 }] }),
+    );
+    await page.route('**/api/conversations/conv_1', (route) =>
+      route.fulfill({
+        json: {
+          id: 'conv_1',
+          messages: [
+            { id: 'm1', role: 'user', content: 'Total revenue?' },
+            { id: 'm2', role: 'assistant', content: 'Total revenue is **R$ 13.6M**.' },
+          ],
+        },
+      }),
+    );
+    await page.goto('/');
+    const history = page.getByRole('navigation', { name: 'Conversation history' });
+    await expect(history).toBeHidden();
+    await page.getByRole('button', { name: 'Open sidebar' }).tap();
+    await expect(page.getByRole('button', { name: 'Close sidebar' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(history).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Open sidebar' })).toBeFocused();
+
+    await page.getByRole('button', { name: 'Open sidebar' }).tap();
+    // Touch screens have no hover, so the delete button must not depend on it.
+    await expect(
+      history.getByRole('button', { name: 'Delete conversation: Total revenue?' }),
+    ).toHaveCSS('opacity', '1');
+    await history.getByRole('link', { name: 'Total revenue?' }).tap();
+    await expect(history).toBeHidden();
+    await expect(page.getByText('R$ 13.6M')).toBeVisible();
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+    expect(overflow).toBe(false);
+  });
+});
+
 test('numeric tables render as a chart with a table view', async ({ page }) => {
   await page.route('**/api/chat', (route) =>
     route.fulfill({

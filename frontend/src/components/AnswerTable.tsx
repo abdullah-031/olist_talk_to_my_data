@@ -37,7 +37,7 @@ export default function AnswerTable({ node, ...props }: Props) {
                 type="button"
                 aria-pressed={item === active}
                 onClick={() => setColumn(index)}
-                className="rounded-md px-2 py-1 text-xs font-medium text-ink-3 transition-colors hover:text-ink aria-pressed:bg-accent-soft aria-pressed:text-accent-strong"
+                className="rounded-md px-2 py-1 text-xs font-medium text-ink-3 transition-colors pointer-coarse:px-2.5 pointer-coarse:py-2 hover:text-ink aria-pressed:bg-accent-soft aria-pressed:text-accent-strong"
               >
                 {item.label}
               </button>
@@ -64,7 +64,7 @@ export default function AnswerTable({ node, ...props }: Props) {
               type="button"
               aria-pressed={view === value}
               onClick={() => setView(value)}
-              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-ink-3 transition-colors hover:text-ink aria-pressed:bg-surface aria-pressed:text-ink aria-pressed:shadow-sm"
+              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-ink-3 transition-colors pointer-coarse:px-2.5 pointer-coarse:py-2 hover:text-ink aria-pressed:bg-surface aria-pressed:text-ink aria-pressed:shadow-sm"
             >
               <Icon aria-hidden="true" size={13} /> {label}
             </button>
@@ -86,15 +86,15 @@ function BarChart({ data, column, label }: { data: TableData; column: number; la
   // Label, bar track and value are subgrid columns, so every row lines up at any width.
   return (
     <ul
-      className="grid grid-cols-[minmax(2.5rem,max-content)_1fr_max-content] gap-y-1 px-3 py-3 sm:px-4 sm:py-4"
+      className="grid grid-cols-[minmax(2.5rem,max-content)_1fr_max-content] gap-y-1 px-1.5 py-3 sm:px-4 sm:py-4"
       aria-label={`${label} by ${data.headers[0]}`}
     >
       {data.rows.map((row, index) => (
         <li
           key={index}
-          className="group col-span-3 grid grid-cols-subgrid items-center gap-x-3 rounded-md px-1.5 py-1 text-[0.8125rem] hover:bg-surface-2"
+          className="group col-span-3 grid grid-cols-subgrid items-center gap-x-2 rounded-md sm:gap-x-3 px-1.5 py-1 text-[0.8125rem] hover:bg-surface-2"
         >
-          <span className="max-w-40 truncate text-ink-2" title={row[0]}>
+          <span className="max-w-24 truncate text-ink-2 sm:max-w-40" title={row[0]}>
             {row[0]}
           </span>
           <span className="flex h-[18px] min-w-0 items-center" aria-hidden="true">

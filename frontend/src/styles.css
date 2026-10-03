@@ -53,11 +53,23 @@
   --color-danger-ink: var(--danger-ink);
   --animate-shimmer: shimmer 2.2s linear infinite;
   --animate-rise: rise 0.35s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-slide-in: slide-in 0.25s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-fade: fade 0.2s ease-out both;
 }
 
 @keyframes shimmer {
   to {
     background-position: -200% 0;
+  }
+}
+@keyframes slide-in {
+  from {
+    translate: -100% 0;
+  }
+}
+@keyframes fade {
+  from {
+    opacity: 0;
   }
 }
 @keyframes rise {

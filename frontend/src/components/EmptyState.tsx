@@ -30,7 +30,7 @@ export default function EmptyState({
   onAsk: (q: string) => void;
 }) {
   return (
-    <div className="mx-auto w-full max-w-3xl animate-rise py-10 sm:py-16">
+    <div className="mx-auto w-full max-w-3xl animate-rise py-8 sm:py-16">
       <p className="mb-4 inline-flex items-center gap-2 rounded-full border border-line bg-surface/70 px-3 py-1 text-xs font-medium text-ink-2 backdrop-blur">
         <span className="size-1.5 rounded-full bg-good" aria-hidden="true" />
         Brazilian e-commerce · 2016–2018 · read-only
@@ -38,7 +38,7 @@ export default function EmptyState({
       <h1 className="text-gradient m-0 text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
         Talk to your data.
       </h1>
-      <p className="mt-4 mb-10 max-w-xl text-base text-pretty text-ink-2 sm:text-lg">
+      <p className="mt-4 mb-8 max-w-xl sm:mb-10 text-base text-pretty text-ink-2 sm:text-lg">
         Ask about revenue, products, sellers, customers and shipping costs in plain language.
         Answers come straight from the Olist warehouse — tables turn into charts automatically.
       </p>

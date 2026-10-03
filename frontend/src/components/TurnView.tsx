@@ -13,14 +13,17 @@ interface Props {
 
 export default function TurnView({ turn, pending, canRetry, agent, onRetry }: Props) {
   return (
-    <article id={`turn-${turn.id}`} className="turn animate-rise scroll-mt-6 space-y-5">
+    <article
+      id={`turn-${turn.id}`}
+      className="turn animate-rise scroll-mt-20 space-y-5 lg:scroll-mt-6"
+    >
       <div className="flex justify-end">
-        <p className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-accent-soft px-4 py-2.5 text-[0.9375rem] leading-relaxed text-ink [overflow-wrap:anywhere]">
+        <p className="max-w-[90%] whitespace-pre-wrap sm:max-w-[85%] rounded-2xl rounded-br-md bg-accent-soft px-4 py-2.5 text-[0.9375rem] leading-relaxed text-ink [overflow-wrap:anywhere]">
           <span className="sr-only">You asked: </span>
           {turn.question}
         </p>
       </div>
-      <div className="flex gap-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:gap-3">
         <span
           aria-hidden="true"
           className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-accent to-accent-strong text-on-accent shadow-sm"
@@ -92,7 +95,7 @@ function Actions({ text, seconds }: { text: string; seconds?: number }) {
     return () => clearTimeout(timer);
   }, [copied]);
   const button =
-    'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink';
+    'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-ink-3 transition-colors pointer-coarse:py-2 hover:bg-surface-2 hover:text-ink';
   return (
     <div className="mt-3 flex items-center gap-1">
       <button
