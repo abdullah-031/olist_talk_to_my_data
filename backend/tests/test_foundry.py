@@ -7,6 +7,7 @@ from app import foundry
 from app.config import Settings
 from azure.core.credentials import AccessToken
 from httpx2 import MockTransport, Response
+from openai.types.conversations.message import Message
 
 ENDPOINT = "https://ttmd.services.ai.azure.com/api/projects/demo"
 BASE = f"{ENDPOINT}/openai/v1"
@@ -236,6 +237,130 @@ async def test_messages_skip_tool_items(make_agent):
     assert calls[1][2]["order"] == "asc"
 
 
+def chart_message():
+    item = message(
+        "msg_chart",
+        "assistant",
+        "output_text",
+        "Monthly revenue.\n\n![Monthly revenue](sandbox:/mnt/data/revenue.png)",
+    )
+    item["content"][0]["annotations"] = [
+        {
+            "type": "container_file_citation",
+            "container_id": "cntr_1",
+            "file_id": "cfile_1",
+            "filename": "/mnt/data/revenue.png",
+            "start_index": 0,
+            "end_index": 1,
+        }
+    ]
+    return item
+
+
+def chart_items():
+    return {
+        "object": "list",
+        "data": [chart_message()],
+        "has_more": False,
+        "first_id": "msg_chart",
+        "last_id": "msg_chart",
+    }
+
+
+@pytest.mark.anyio
+async def test_chart_links_survive_chat_and_history(make_agent):
+    response = deepcopy(RESPONSE)
+    response["output"] = [chart_message()]
+    agent, _ = make_agent(
+        {
+            ("GET", "/conversations/conv_1"): conversation("conv_1", OWNED),
+            ("POST", "/responses"): response,
+            ("GET", "/conversations/conv_1/items"): chart_items(),
+        }
+    )
+    try:
+        _, answer = await agent.ask("Chart monthly revenue", "conv_1", "alice")
+        assert "sandbox:" not in answer
+        assert "![Monthly revenue](/api/conversations/conv_1/files/cntr_1/cfile_1)" in answer
+        assert answer.count("](/api/conversations/conv_1/files/cntr_1/cfile_1)") == 1
+        assert (
+            "[Download PNG](/api/conversations/conv_1/files/cntr_1/cfile_1?download=true)" in answer
+        )
+        assert (await agent.messages("conv_1", "alice"))[0]["content"] == answer
+    finally:
+        await agent.close()
+
+
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("Download the chart: [revenue.png](sandbox:/mnt/data/revenue.png)", ""),
+        ("[Download the chart (PNG)](sandbox:/mnt/data/revenue.png)", ""),
+        (
+            "Revenue peaked in May; see [the chart](sandbox:/mnt/data/revenue.png) by month.",
+            "Revenue peaked in May; see the chart by month.\n\n",
+        ),
+    ],
+)
+def test_agent_file_links_give_way_to_one_inline_chart_and_download(text, kept):
+    item = chart_message()
+    item["content"][0]["text"] = f"Revenue by month.\n\n{text}\n\nScope: delivered orders."
+    answer = foundry.message_text(Message.model_validate(item), "conv_1")
+    url = "/api/conversations/conv_1/files/cntr_1/cfile_1"
+    expected_body = "Revenue by month.\n\n" + kept + "Scope: delivered orders."
+    assert answer == (
+        f"{expected_body}\n\n![revenue.png]({url})\n\n[Download PNG]({url}?download=true)"
+    )
+
+
+@pytest.mark.anyio
+async def test_download_requires_owner_and_exact_assistant_citation(make_agent):
+    agent, calls = make_agent(
+        {
+            ("GET", "/conversations/conv_1"): conversation("conv_1", OWNED),
+            ("GET", "/conversations/conv_1/items"): chart_items(),
+            ("GET", "/containers/cntr_1/files/cfile_1/content"): Response(200, content=b"PNG"),
+        }
+    )
+    try:
+        assert await agent.artifact("conv_1", "cntr_1", "cfile_1", "alice") == (
+            b"PNG",
+            "revenue.png",
+        )
+        calls.clear()
+        with pytest.raises(foundry.ConversationNotFound):
+            await agent.artifact("conv_1", "cntr_1", "cfile_1", "bob")
+        assert len(calls) == 1
+        calls.clear()
+        with pytest.raises(foundry.ArtifactNotFound):
+            await agent.artifact("conv_1", "cntr_other", "cfile_1", "alice")
+        assert not any("/containers/" in path for _, path, _, _ in calls)
+    finally:
+        await agent.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("expired", [False, True])
+async def test_file_limits_and_expiration(make_agent, monkeypatch, expired):
+    monkeypatch.setattr(foundry, "MAX_FILE_BYTES", 4)
+    agent, _ = make_agent(
+        {
+            ("GET", "/conversations/conv_1"): conversation("conv_1", OWNED),
+            ("GET", "/conversations/conv_1/items"): chart_items(),
+            ("GET", "/containers/cntr_1/files/cfile_1/content"): (
+                Response(404, json={"error": {"message": "expired"}})
+                if expired
+                else Response(200, content=b"12345")
+            ),
+        }
+    )
+    try:
+        with pytest.raises(foundry.ArtifactNotFound if expired else foundry.ArtifactTooLarge):
+            await agent.artifact("conv_1", "cntr_1", "cfile_1", "alice")
+    finally:
+        await agent.close()
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("status", ["incomplete", "failed", "completed"])
 async def test_unfinished_or_approval_responses_are_not_business_answers(make_agent, status):
@@ -264,3 +389,21 @@ async def test_unfinished_or_approval_responses_are_not_business_answers(make_ag
         assert calls[-1][:2] == ("DELETE", "/conversations/conv_new")
     finally:
         await agent.close()
+
+
+def test_each_cited_chart_shows_with_its_own_download():
+    item = chart_message()
+    item["content"][0]["text"] = "Two charts."
+    item["content"][0]["annotations"].append(
+        {
+            **item["content"][0]["annotations"][0],
+            "file_id": "cfile_2",
+            "filename": "/mnt/data/orders.png",
+        }
+    )
+    answer = foundry.message_text(Message.model_validate(item), "conv_1")
+    first, second = (f"/api/conversations/conv_1/files/cntr_1/cfile_{n}" for n in (1, 2))
+    assert answer == (
+        f"Two charts.\n\n![revenue.png]({first})\n\n[Download PNG]({first}?download=true)"
+        f"\n\n![orders.png]({second})\n\n[Download PNG]({second}?download=true)"
+    )

@@ -3,6 +3,7 @@ import { LoaderCircle, Menu, RefreshCw, TriangleAlert } from 'lucide-react';
 import { request } from './api';
 import Composer from './components/Composer';
 import EmptyState from './components/EmptyState';
+import Login from './components/Login';
 import Sidebar, { Brand, MobileSidebar, NewChatButton } from './components/Sidebar';
 import TurnView from './components/TurnView';
 import { useTheme } from './components/ThemeToggle';
@@ -12,6 +13,7 @@ import type {
   ConversationDetail,
   ConversationSummary,
   Health,
+  Session,
   Turn,
 } from './types';
 
@@ -27,6 +29,7 @@ function conversationUrl(id: string | null): string {
 }
 
 export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [connectionError, setConnectionError] = useState('');
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -50,6 +53,27 @@ export default function App() {
   const theme = useTheme();
   const agent = health?.agent ?? 'the Foundry agent';
   const configured = health?.configured ?? false;
+
+  // Deployments with a shared username and password answer authenticated: false until
+  // sign-in; Entra and local deployments are authenticated from the start.
+  useEffect(() => {
+    const controller = new AbortController();
+    request<Session>('/api/session', { signal: controller.signal })
+      .then(setSession)
+      .catch(() => {
+        // A failing check is a connection problem, reported by the health check below.
+        if (!controller.signal.aborted) setSession({ mode: 'unknown', authenticated: true });
+      });
+    return () => controller.abort();
+  }, [refresh]);
+  useEffect(() => {
+    const expired = () =>
+      setSession((current) =>
+        current?.mode === 'shared_login' ? { ...current, authenticated: false } : current,
+      );
+    window.addEventListener('session-expired', expired);
+    return () => window.removeEventListener('session-expired', expired);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -92,8 +116,8 @@ export default function App() {
     }
   }, []);
   useEffect(() => {
-    if (configured) void loadConversations();
-  }, [configured, loadConversations]);
+    if (configured && session?.authenticated) void loadConversations();
+  }, [configured, session?.authenticated, loadConversations]);
 
   const load = useCallback(async (id: string | null) => {
     controllerRef.current?.abort();
@@ -221,6 +245,24 @@ export default function App() {
     onDelete: (id: string) => void remove(id),
     onReload: () => void loadConversations(),
   };
+
+  if (!session)
+    return (
+      <main className="grid min-h-dvh place-items-center">
+        <p className="flex items-center gap-2 text-sm text-ink-3" role="status">
+          <LoaderCircle aria-hidden="true" size={16} className="animate-spin" /> Loading…
+        </p>
+      </main>
+    );
+  if (!session.authenticated)
+    return (
+      <Login
+        onSignedIn={() => {
+          setSession({ ...session, authenticated: true });
+          setRefresh((value) => value + 1);
+        }}
+      />
+    );
 
   return (
     <div className="min-h-dvh">

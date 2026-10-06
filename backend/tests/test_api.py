@@ -4,7 +4,7 @@ import httpx
 import openai
 import pytest
 from app.config import Settings
-from app.foundry import AnswerIncomplete, ConversationNotFound
+from app.foundry import AnswerIncomplete, ArtifactNotFound, ArtifactTooLarge, ConversationNotFound
 from app.main import create_app
 from azure.core.exceptions import ClientAuthenticationError
 from fastapi.testclient import TestClient
@@ -258,6 +258,146 @@ def test_incomplete_answers_are_actionable():
     assert response.json()["request_id"] == response.headers["X-Request-ID"]
 
 
-def test_generated_file_endpoint_is_removed():
+def test_chart_and_csv_download_headers_and_caller():
+    class FileAgent(FakeAgent):
+        async def artifact(self, conversation_id, container_id, file_id, user):
+            self.owned(conversation_id, user)
+            self.received = (conversation_id, container_id, file_id, user)
+            return (
+                (b"png", "monthly revenue.png")
+                if file_id == "chart"
+                else (b"month,revenue\n2018-01,100.25\n", "revenue.csv")
+            )
+
+    agent = FileAgent()
+    agent.store["conv_1"] = ("alice", [])
+    config = settings(app_env="production", auth_mode="azure_container_apps")
+    url = "/api/conversations/conv_1/files/cntr_1/chart"
+    with client(agent, config) as api:
+        assert api.get(url).status_code == 401
+        assert api.get(url, headers={"x-ms-client-principal-id": "bob"}).status_code == 404
+        alice = {"x-ms-client-principal-id": "alice"}
+        preview = api.get(url, headers=alice)
+        assert preview.status_code == 200 and preview.content == b"png"
+        assert preview.headers["content-type"] == "image/png"
+        assert preview.headers["content-disposition"].startswith("inline;")
+        assert preview.headers["cache-control"] == "no-store"
+        assert agent.received == ("conv_1", "cntr_1", "chart", "alice")
+        download = api.get(url + "?download=true", headers=alice)
+        assert download.headers["content-disposition"].startswith("attachment;")
+        assert "monthly%20revenue.png" in download.headers["content-disposition"]
+        csv = api.get(url.replace("chart", "csv"), headers=alice)
+        assert csv.headers["content-type"].startswith("text/csv")
+        assert csv.headers["content-disposition"].startswith("attachment;")
+
+
+@pytest.mark.parametrize("error,status", [(ArtifactNotFound(), 404), (ArtifactTooLarge(), 413)])
+def test_file_errors_are_actionable(error, status):
+    class FileAgent(FakeAgent):
+        async def artifact(self, *args):
+            raise error
+
+    with client(FileAgent()) as api:
+        response = api.get("/api/conversations/conv_1/files/cntr_1/cfile_1")
+    assert response.status_code == status
+    assert response.json()["request_id"] == response.headers["X-Request-ID"]
+
+
+def shared(**kwargs):
+    return settings(
+        app_env="production",
+        auth_mode="shared_login",
+        shared_login_username="demo",
+        shared_login_password="demo-password",
+        session_secret="test-secret",
+        **kwargs,
+    )
+
+
+def secure_client(agent, config=None):
+    # The session cookie is Secure in production, so the test client must speak HTTPS.
+    return TestClient(create_app(config or shared(), agent), base_url="https://testserver")
+
+
+def test_shared_login_requires_the_credentials_and_then_allows_questions():
+    agent = FakeAgent()
+    with secure_client(agent) as api:
+        assert api.get("/api/session").json() == {"mode": "shared_login", "authenticated": False}
+        denied = api.post("/api/chat", json=QUESTION)
+        assert denied.status_code == 401
+        assert_response_headers(denied)
+        assert api.get("/api/conversations").status_code == 401
+        assert agent.received is None
+
+        wrong = api.post("/api/login", json={"username": "demo", "password": "nope"})
+        assert wrong.status_code == 401
+        assert api.post("/api/chat", json=QUESTION).status_code == 401
+
+        right = {"username": "demo", "password": "demo-password"}
+        assert api.post("/api/login", json=right).status_code == 204
+        assert api.get("/api/session").json()["authenticated"] is True
+        assert api.post("/api/chat", json=QUESTION).status_code == 200
+        assert api.post("/api/logout").status_code == 204
+        assert api.get("/api/session").json()["authenticated"] is False
+        assert api.post("/api/chat", json=QUESTION).status_code == 401
+
+
+def test_shared_login_keeps_each_browser_history_separate():
+    agent = FakeAgent()
+    app = create_app(shared(), agent)
+    base = {"base_url": "https://testserver"}
+    with TestClient(app, **base) as first, TestClient(app, **base) as second:
+        credentials = {"username": "demo", "password": "demo-password"}
+        assert first.post("/api/login", json=credentials).status_code == 204
+        assert second.post("/api/login", json=credentials).status_code == 204
+        conversation_id = first.post("/api/chat", json=QUESTION).json()["conversation_id"]
+        assert len(first.get("/api/conversations").json()) == 1
+        assert second.get("/api/conversations").json() == []
+        assert second.get(f"/api/conversations/{conversation_id}").status_code == 404
+
+
+def test_forged_session_cookies_are_rejected():
+    agent = FakeAgent()
+    with secure_client(agent) as api:
+        for value in ["", "nonsense", "visitor.9999999999.badsignature", "visitor.0.x"]:
+            api.cookies.set("olist_session", value)
+            assert api.post("/api/chat", json=QUESTION).status_code == 401
+    assert agent.received is None
+
+
+def test_expired_session_cookies_are_rejected():
+    from app import session as session_module
+
+    secret = "test-secret"
+    expired = session_module.issue(secret, -1)
+    assert session_module.visitor(secret, expired) is None
+    live = session_module.issue(secret, 60)
+    assert session_module.visitor(secret, live) is not None
+    assert session_module.visitor("other-secret", live) is None
+
+
+def test_repeated_wrong_passwords_are_throttled():
+    with secure_client(FakeAgent()) as api:
+        wrong = {"username": "demo", "password": "nope"}
+        statuses = [api.post("/api/login", json=wrong).status_code for _ in range(12)]
+    assert statuses[:10] == [401] * 10
+    assert statuses[10:] == [429, 429]
+
+
+def test_shared_login_settings_are_validated():
+    with pytest.raises(ValueError):
+        settings(app_env="production", auth_mode="shared_login")
+    with pytest.raises(ValueError):
+        settings(
+            app_env="production",
+            auth_mode="shared_login",
+            shared_login_username="demo",
+            shared_login_password="short",
+        )
+
+
+def test_login_is_absent_unless_shared_login_is_enabled():
     with client(FakeAgent()) as api:
-        assert api.get("/api/conversations/conv_1/files/cntr_1/cfile_1").status_code == 404
+        assert api.get("/api/session").json() == {"mode": "local", "authenticated": True}
+        response = api.post("/api/login", json={"username": "demo", "password": "demo-password"})
+        assert response.status_code == 404

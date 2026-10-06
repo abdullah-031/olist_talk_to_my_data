@@ -176,3 +176,16 @@ Validation: 37 Python tests (including fake-psql maintenance checks), one fronte
 unit test, and 15 Edge browser tests passed. Ruff, formatting, Bash syntax, and
 TypeScript/Vite build passed. Docker image execution was unavailable because the
 local engine was stopped. No live Foundry or database calls occurred.
+
+## 2026-10-06 — Charts shown inline again
+
+Salah asked for Code Interpreter charts to appear in the chat as well as download.
+This brings back the 2026-10-03 file handling that the 2026-10-04 cleanup removed:
+the backend rewrites sandbox links that match a real `container_file_citation` into
+same-origin links, and serves the file only after checking the conversation's owner,
+agent, and that exact citation (PNG and CSV, 10 MB cap). Every cited PNG is shown
+inline below the answer with one download link under it, whether or not the agent
+wrote its own image markdown. The agent's own link to the same file is dropped (or
+reduced to its text mid-sentence) so each file has a single download link. The browser only loads images from these
+routes. Files stay in the Foundry container and may expire; the UI then says so.
+No agent instruction change is needed.

@@ -5,6 +5,7 @@ import openai
 from azure.ai.projects.aio import AIProjectClient
 from azure.identity.aio import DefaultAzureCredential
 
+from app.artifacts import MAX_FILE_BYTES, MEDIA_TYPES, citations, filename, message_text
 from app.config import Settings
 
 TITLE_CHARS = 80
@@ -16,12 +17,16 @@ class ConversationNotFound(Exception):
     """The conversation does not exist, or it belongs to another user or agent."""
 
 
+class ArtifactNotFound(Exception):
+    """The file is not cited in an assistant message in this conversation."""
+
+
+class ArtifactTooLarge(Exception):
+    """Generated downloads are bounded to protect the API's memory."""
+
+
 class AnswerIncomplete(Exception):
     """Foundry did not finish the response or needs an unsupported approval action."""
-
-
-def message_text(item: Any) -> str:
-    return "".join(part.text for part in item.content if part.type in ("input_text", "output_text"))
 
 
 class FoundryAgent:
@@ -84,7 +89,7 @@ class FoundryAgent:
                     await self.client.conversations.delete(conversation_id)
             raise
         answer = "\n\n".join(
-            message_text(item)
+            message_text(item, conversation_id)
             for item in response.output
             if item.type == "message" and item.role == "assistant"
         )
@@ -128,10 +133,46 @@ class FoundryAgent:
                 continue
             if item.role == "assistant" and item.status != "completed":
                 continue
-            text = message_text(item)
+            text = message_text(item, conversation_id)
             if text.strip():
                 messages.append({"id": item.id, "role": item.role, "content": text})
         return messages
+
+    async def artifact(
+        self, conversation_id: str, container_id: str, file_id: str, user: str
+    ) -> tuple[bytes, str]:
+        await self._retrieve(conversation_id, user)
+        matched = None
+        async for item in self.client.conversations.items.list(
+            conversation_id, order="desc", limit=100
+        ):
+            matched = next(
+                (
+                    citation
+                    for citation in citations(item)
+                    if citation.container_id == container_id and citation.file_id == file_id
+                ),
+                None,
+            )
+            if matched:
+                break
+        if matched is None:
+            raise ArtifactNotFound
+        name = filename(matched)
+        if not any(name.lower().endswith(suffix) for suffix in MEDIA_TYPES):
+            raise ArtifactNotFound
+        try:
+            async with self.client.containers.files.content.with_streaming_response.retrieve(
+                file_id=file_id, container_id=container_id
+            ) as response:
+                content = bytearray()
+                async for chunk in response.iter_bytes(chunk_size=65_536):
+                    if len(content) + len(chunk) > MAX_FILE_BYTES:
+                        raise ArtifactTooLarge
+                    content.extend(chunk)
+        except openai.NotFoundError:
+            raise ArtifactNotFound from None
+        return bytes(content), name
 
     async def delete(self, conversation_id: str, user: str) -> None:
         await self._retrieve(conversation_id, user)

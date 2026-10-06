@@ -3,6 +3,10 @@ export interface Answer {
   conversation_id: string;
   answer: string;
 }
+export interface Session {
+  mode: string;
+  authenticated: boolean;
+}
 export interface Health {
   status: string;
   configured: boolean;

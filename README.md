@@ -55,7 +55,8 @@ Containers need a service principal or managed identity for Foundry; see
   to that agent through its configured tools; local Codex skills are not
   automatically installed on it. Repository edits do not update remote settings.
 - Backend limits cover request bytes, question length, and concurrent chat calls.
-  Production requires ACA caller authentication. Errors do not echo questions or
+  Production requires caller authentication: ACA built-in auth, or the shared
+  username and password of `AUTH_MODE=shared_login` for demos. Errors do not echo questions or
   credentials. Incomplete answers and unsupported approval requests fail clearly.
   See [agent/tool requirements](docs/agent-safety.md).
 - Health reports whether settings are configured; it does not probe Foundry.
